@@ -1,0 +1,19 @@
+{
+  "name": "mywhisper",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Browser-based audio transcription powered by OpenAI Whisper (via Transformers.js). Runs entirely locally — no data leaves your browser.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "download-models": "node scripts/download-models.js"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.0.0"
+  },
+  "devDependencies": {
+    "vite": "^6.0.0"
+  }
+}

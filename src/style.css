@@ -108,11 +108,11 @@ body {
 /* Controls ---------------------------------------------------------------- */
 .controls {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, 1fr);
   gap: 16px;
 }
 
-@media (max-width: 520px) {
+@media (max-width: 600px) {
   .controls {
     grid-template-columns: 1fr;
   }
@@ -227,47 +227,208 @@ body {
   transition: width 0.2s;
 }
 
-/* Result ------------------------------------------------------------------ */
-.result {
+/* Queue ------------------------------------------------------------------- */
+.queue-section {
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
 
-.result__toolbar {
+.queue-section__toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap;
 }
 
-.result__heading {
+.queue-section__heading {
   margin: 0;
   font-size: 1.2rem;
 }
 
-.result__actions {
+.queue-section__actions {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
 }
 
-.result__text {
-  width: 100%;
-  min-height: 240px;
-  resize: vertical;
+.ts-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+
+.ts-toggle input {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.queue {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.job {
   background: var(--surface);
-  color: var(--text);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 16px;
-  font-family: inherit;
-  font-size: 1rem;
-  line-height: 1.6;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
-.result__text:focus-visible {
+.job__head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.job__name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.job__status {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.job__status[data-state='done'] {
+  color: #5fd08a;
+}
+
+.job__status[data-state='error'] {
+  color: var(--danger);
+  white-space: normal;
+}
+
+.job__status[data-state='canceled'] {
+  color: #d8a657;
+}
+
+.job__actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.job__btn {
+  padding: 5px 10px;
+  font-size: 0.82rem;
+}
+
+.job__btn--icon {
+  padding: 5px 9px;
+}
+
+.job__bar {
+  height: 6px;
+  background: var(--surface-2);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.job__bar-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width 0.2s;
+}
+
+.job__text {
+  width: 100%;
+  min-height: 120px;
+  resize: vertical;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  font-family: inherit;
+  font-size: 0.95rem;
+  line-height: 1.55;
+}
+
+.job__text:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+}
+
+/* Audio player + timestamped segments */
+.job__audio {
+  width: 100%;
+  height: 36px;
+}
+
+.job__segments {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.seg {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 7px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+}
+
+.seg:last-child {
+  border-bottom: none;
+}
+
+.seg:hover {
+  background: var(--surface-2);
+}
+
+.seg--active {
+  background: rgba(109, 139, 255, 0.16);
+}
+
+.seg__time {
+  flex: 0 0 auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--accent);
+  background: transparent;
+  border: none;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+
+.seg__time:hover {
+  text-decoration: underline;
+}
+
+.seg__text {
+  flex: 1 1 auto;
+  font-size: 0.95rem;
+  line-height: 1.5;
 }
 
 /* Footer ------------------------------------------------------------------ */

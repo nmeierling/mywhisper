@@ -69,11 +69,33 @@ function serveLocalModels() {
   };
 }
 
+// Cross-origin isolation (COOP + COEP) enables SharedArrayBuffer, which
+// onnxruntime-web needs to run its multi-threaded WASM backend — without it
+// model loading fails outright in some browsers. A static host must send these
+// same headers (see README); GitHub Pages can't, so use the coi-serviceworker
+// shim there.
+function crossOriginIsolation() {
+  const setHeaders = (_req, res, next) => {
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+    res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+    next();
+  };
+  return {
+    name: 'cross-origin-isolation',
+    configureServer(server) {
+      server.middlewares.use(setHeaders);
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use(setHeaders);
+    },
+  };
+}
+
 // `base: './'` keeps asset paths relative so the built site works from any
 // subdirectory on a static host (GitHub Pages project sites, etc.).
 export default defineConfig({
   base: './',
-  plugins: [serveLocalModels()],
+  plugins: [crossOriginIsolation(), serveLocalModels()],
   worker: {
     format: 'es',
   },

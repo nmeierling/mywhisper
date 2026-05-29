@@ -3,37 +3,57 @@
 Browser-based audio transcription powered by OpenAI's **Whisper** model, running
 locally via [Transformers.js](https://github.com/huggingface/transformers.js).
 
-Drop or select any audio file (M4A, MP3, WAV, OGG, FLAC, …), pick a language and
-model size, and get a text transcript — **entirely in your browser**. No audio
-is uploaded; nothing is sent to any server. After transcribing you can edit,
-copy, or download the text as a `.txt` file.
+Drop or select audio files (M4A, MP3, WAV, OGG, FLAC, …), pick a language, model
+size, and backend, then transcribe — **entirely in your browser**. No audio is
+uploaded; nothing is sent to any server. Queue several files and they transcribe
+one after another. Each finished transcript is shown as **timestamped segments**:
+click a timestamp to re-listen to that part of the audio. Copy or download any
+transcript (or all of them), optionally with `[m:ss]` timestamps inline.
 
 ## How it works
 
-1. The audio file is decoded and resampled to 16 kHz mono using the Web Audio API.
+1. Each audio file is decoded and resampled to 16 kHz mono using the Web Audio
+   API, on the main thread (off the UI thread, so it stays responsive).
 2. The Whisper model is loaded from local files (see "Pre-downloading models"),
    never from the network.
-3. Transcription runs in a **Web Worker** (off the main thread) so the UI stays
-   responsive. Inference uses the WASM backend.
+3. Transcription runs in a single **Web Worker** so the UI stays responsive and
+   live progress (audio-time processed, ETA, streaming text) is reported back.
+4. Files are processed **sequentially** by the one warm worker — the right model
+   for the hardware, since parallel workers would each reload the model and just
+   contend for the same CPU/GPU. While one file transcribes, the **next file's
+   audio is decoded ahead**, hiding decode latency.
+
+### Backends
+
+| Backend | When | Notes |
+| ------- | ---- | ----- |
+| **WebGPU** | GPU available | Much faster. Uses fp32 encoder + q4 decoder. |
+| **WASM** | fallback / everywhere | CPU, multi-threaded. Uses q8 weights. |
+
+The **Auto** setting (default) uses WebGPU when the browser exposes a GPU adapter
+and falls back to WASM otherwise. If WebGPU fails to initialize at load time, it
+falls back to WASM automatically.
 
 ## Develop
 
 ```bash
 npm install
 npm run download-models   # fetch Whisper models to ~/.mywhisper (required, once)
-npm run dev               # start the dev server at http://localhost:5173
-npm run build             # produce a self-contained static site in dist/
-npm run preview           # preview the production build locally
+npm run dev               # dev server at http://localhost:5173
+npm run build             # self-contained static site in dist/
+npm run preview           # preview the production build
 ```
 
 ## Pre-downloading models to disk
 
 **This app loads models locally only — it never contacts the Hugging Face hub
-at runtime.** You must download the models once before using the app:
+at runtime.** Download them once before using the app:
 
 ```bash
-npm run download-models                       # tiny + base + small
-npm run download-models Xenova/whisper-base    # just one
+npm run download-models                       # all models, both backends
+npm run download-models Xenova/whisper-base   # just one
+npm run download-models -- --backend=wasm     # WASM (q8) weights only
+npm run download-models -- --backend=webgpu   # WebGPU weights only
 ```
 
 Files are saved under `~/.mywhisper/models/<model>/`. From there:
@@ -45,41 +65,59 @@ Files are saved under `~/.mywhisper/models/<model>/`. From there:
 
 Details:
 
-- The download grabs the `q8` (quantized) ONNX weights to match the precision
-  pinned in [src/worker.js](src/worker.js). Keep `ONNX_KEEP` in the script in
-  sync if you change `DTYPE`.
+- ONNX precision per backend lives in [src/config.js](src/config.js) (a single
+  source of truth shared by the worker and the download script), so the files on
+  disk always match what the app requests. By default both backends' weights are
+  downloaded; use `--backend=` to fetch only one.
 - The app loads the model directory using an absolute URL derived from the
   page's location, so it works at a domain root or in a subdirectory.
-- A model that hasn't been downloaded produces a clear error telling you which
-  `download-models` command to run — there is no silent network fallback.
+- A model that hasn't been downloaded produces a clear error telling you to run
+  `download-models` — there is no silent network fallback.
 
 ## Deploy
 
 `npm run build` outputs a fully self-contained static site in `dist/` —
 including the model files under `dist/models/`. Drop it on any static host
-(GitHub Pages, Netlify, Cloudflare Pages, S3, …). Asset paths are relative, so
-it works from a subdirectory too. Nothing is fetched from any third party at
-runtime.
+(GitHub Pages, Netlify, Cloudflare Pages, S3, …). Asset paths are relative, so it
+works from a subdirectory too. Nothing is fetched from any third party at runtime.
 
-> Heads up: bundling models makes `dist/` large (~40 MB for tiny, up to a few
-> hundred MB with all three). Only download the model sizes you intend to ship.
+> **Required: cross-origin isolation.** onnxruntime-web's multi-threaded WASM
+> backend needs `SharedArrayBuffer`, which only exists when the page is
+> cross-origin isolated. The site **will not load models** without these two
+> response headers:
+>
+> ```
+> Cross-Origin-Opener-Policy: same-origin
+> Cross-Origin-Embedder-Policy: require-corp
+> ```
+>
+> The dev and preview servers set them automatically. On a static host, send
+> them via the host's config (e.g. a Netlify/Cloudflare `_headers` file). Hosts
+> that can't set headers (GitHub Pages) need the
+> [`coi-serviceworker`](https://github.com/gzuidhof/coi-serviceworker) shim.
+
+> Heads up: bundling models makes `dist/` large (tens to hundreds of MB).
+> Download only the model sizes and backends you intend to ship.
 
 ## Model sizes
 
-Sizes are for the `q8` (quantized) weights actually downloaded.
+Approximate on-disk size of the WASM (q8) weights. WebGPU weights (fp32 encoder
++ q4 decoder) add more, so downloading both backends roughly doubles this.
 
-| Model | Download | Speed | Accuracy |
-| ----- | -------- | ----- | -------- |
-| Tiny  | ~40 MB   | fastest | lowest |
-| Base  | ~80 MB   | balanced | good |
-| Small | ~250 MB  | slowest | best |
+| Model | q8 size | Speed | Accuracy |
+| ----- | ------- | ----- | -------- |
+| Tiny  | ~40 MB  | fastest | lowest |
+| Base  | ~80 MB  | balanced | good |
+| Small | ~250 MB | slowest | best |
 
-These are loaded from disk (see above), so there is no per-use download — the
-only wait is the initial model load into memory.
+Loaded from disk, so there's no per-use download — the only wait is the one-time
+model load into memory (warmed as soon as you add files).
 
-## Notes & ideas for later
+## Ideas for later
 
-- Runs on the WASM backend for broad compatibility. A WebGPU backend would be
-  significantly faster on supported browsers — a natural next enhancement.
-- Timestamps / subtitle (`.srt`, `.vtt`) export.
+- English-only (`.en`) models when the language is English — smaller and more
+  accurate for English.
+- Subtitle export (`.srt`, `.vtt`) — the timestamped segments are already there.
 - Microphone recording as an input source.
+- Persist transcripts + chunk-level resume (IndexedDB) so a reload doesn't lose
+  progress.

@@ -8,6 +8,10 @@
       name="description"
       content="Transcribe audio files to text entirely in your browser with OpenAI Whisper. No uploads, no servers — your audio never leaves your device."
     />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎙️</text></svg>"
+    />
   </head>
   <body>
     <main class="app">
@@ -19,42 +23,36 @@
         </p>
       </header>
 
-      <!-- Drop zone / file picker -->
+      <!-- Drop zone / file picker (multiple) -->
       <section
         id="dropzone"
         class="dropzone"
         tabindex="0"
         role="button"
-        aria-label="Choose or drop an audio file"
+        aria-label="Choose or drop audio files"
       >
         <input
           id="file-input"
           type="file"
           accept="audio/*"
           class="dropzone__input"
+          multiple
           hidden
         />
         <div class="dropzone__inner">
           <span class="dropzone__icon" aria-hidden="true">🎙️</span>
-          <p class="dropzone__primary">Drop an audio file here</p>
-          <p class="dropzone__secondary">or click to browse · M4A, MP3, WAV, …</p>
+          <p class="dropzone__primary">Drop audio files here</p>
+          <p class="dropzone__secondary">
+            or click to browse · add as many as you like · M4A, MP3, WAV, …
+          </p>
         </div>
-        <p id="file-name" class="dropzone__filename" hidden></p>
       </section>
 
       <!-- Controls -->
       <section class="controls">
         <label class="field">
           <span class="field__label">Model size</span>
-          <select id="model-select" class="field__control">
-            <option value="Xenova/whisper-tiny">Tiny — fastest, ~40 MB</option>
-            <option value="Xenova/whisper-base" selected>
-              Base — balanced, ~80 MB
-            </option>
-            <option value="Xenova/whisper-small">
-              Small — most accurate, ~250 MB
-            </option>
-          </select>
+          <select id="model-select" class="field__control"></select>
         </label>
 
         <label class="field">
@@ -63,13 +61,22 @@
             <option value="auto" selected>Auto-detect</option>
           </select>
         </label>
+
+        <label class="field">
+          <span class="field__label">Backend</span>
+          <select id="backend-select" class="field__control">
+            <option value="auto" selected>Auto (WebGPU if available)</option>
+            <option value="webgpu">WebGPU</option>
+            <option value="wasm">WASM (CPU)</option>
+          </select>
+        </label>
       </section>
 
       <button id="transcribe-btn" class="btn btn--primary" disabled>
         Transcribe
       </button>
 
-      <!-- Status / progress -->
+      <!-- Global status (model loading) -->
       <section id="status" class="status" hidden>
         <p id="status-message" class="status__message"></p>
         <div class="status__bar" hidden>
@@ -77,21 +84,25 @@
         </div>
       </section>
 
-      <!-- Result -->
-      <section id="result" class="result" hidden>
-        <div class="result__toolbar">
-          <h2 class="result__heading">Transcript</h2>
-          <div class="result__actions">
-            <button id="copy-btn" class="btn btn--ghost">Copy</button>
-            <button id="download-btn" class="btn btn--ghost">Download .txt</button>
+      <!-- Queue -->
+      <section id="queue-section" class="queue-section" hidden>
+        <div class="queue-section__toolbar">
+          <h2 id="queue-summary" class="queue-section__heading">Queue</h2>
+          <div class="queue-section__actions">
+            <label id="timestamps-toggle-label" class="ts-toggle" hidden>
+              <input type="checkbox" id="timestamps-toggle" />
+              Timestamps
+            </label>
+            <button id="copy-all-btn" class="btn btn--ghost" hidden>Copy all</button>
+            <button id="download-all-btn" class="btn btn--ghost" hidden>
+              Download all
+            </button>
+            <button id="clear-done-btn" class="btn btn--ghost" hidden>
+              Clear completed
+            </button>
           </div>
         </div>
-        <textarea
-          id="transcript"
-          class="result__text"
-          spellcheck="false"
-          aria-label="Transcript text"
-        ></textarea>
+        <ul id="queue" class="queue"></ul>
       </section>
 
       <footer class="app__footer">

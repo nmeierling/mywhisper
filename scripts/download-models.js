@@ -1,38 +1,50 @@
 // Downloads Whisper model files from the Hugging Face hub to ~/.mywhisper/models
-// so they can be served locally (see the serveLocalModels plugin in
-// vite.config.js). Run: `npm run download-models [model-id ...]`.
+// so they can be served locally (Vite plugin) and bundled into builds.
+//
+//   npm run download-models                          # all models, both backends
+//   npm run download-models Xenova/whisper-base      # one model
+//   npm run download-models -- --backend=wasm        # only WASM (q8) weights
+//   npm run download-models -- --backend=webgpu      # only WebGPU weights
+//
+// ONNX precision is read from src/config.js, so the files on disk always match
+// what the app requests at runtime.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline as streamPipeline } from 'node:stream/promises';
+import { MODELS, onnxFilesFor } from '../src/config.js';
 
 const MODELS_DIR = path.join(os.homedir(), '.mywhisper', 'models');
 const HF = 'https://huggingface.co';
 
-// Which ONNX weight files to keep. Must match the dtype pinned in
-// src/worker.js: `q8` → the "_quantized" variants. Other ONNX precisions are
-// skipped to save disk space.
-const ONNX_KEEP = ['encoder_model_quantized', 'decoder_model_merged_quantized'];
-
 // Repo bookkeeping files we never need at runtime.
 const SKIP = new Set(['.gitattributes', 'README.md']);
 
-const DEFAULT_MODELS = [
-  'Xenova/whisper-tiny',
-  'Xenova/whisper-base',
-  'Xenova/whisper-small',
-];
+// --- Parse args -------------------------------------------------------------
+const argv = process.argv.slice(2);
+let backend = 'both';
+const requested = [];
+for (const arg of argv) {
+  const m = /^--backend=(wasm|webgpu|both)$/.exec(arg);
+  if (m) backend = m[1];
+  else if (!arg.startsWith('--')) requested.push(arg);
+}
+const models = requested.length ? requested : MODELS.map((m) => m.id);
 
-const models = process.argv.slice(2).length
-  ? process.argv.slice(2)
-  : DEFAULT_MODELS;
+// ONNX weight files to keep, as full repo paths (e.g. onnx/encoder_model.onnx).
+const keepOnnx = new Set(
+  (backend === 'both' ? ['wasm', 'webgpu'] : [backend]).flatMap(onnxFilesFor),
+);
 
 function shouldDownload(rfilename) {
   if (SKIP.has(rfilename)) return false;
   if (rfilename.startsWith('onnx/')) {
-    const base = rfilename.slice('onnx/'.length);
-    return ONNX_KEEP.some((keep) => base.startsWith(keep));
+    // Keep the chosen weights plus any external-data sidecar (`*.onnx_data`).
+    for (const keep of keepOnnx) {
+      if (rfilename === keep || rfilename === `${keep}_data`) return true;
+    }
+    return false;
   }
   return true; // config / tokenizer / preprocessor metadata — always keep
 }
@@ -45,9 +57,7 @@ function human(bytes) {
 
 async function listFiles(model) {
   const res = await fetch(`${HF}/api/models/${model}`);
-  if (!res.ok) {
-    throw new Error(`Could not list ${model}: HTTP ${res.status}`);
-  }
+  if (!res.ok) throw new Error(`Could not list ${model}: HTTP ${res.status}`);
   const info = await res.json();
   return (info.siblings ?? []).map((s) => s.rfilename);
 }
@@ -57,9 +67,7 @@ async function downloadFile(model, rfilename) {
   fs.mkdirSync(path.dirname(dest), { recursive: true });
 
   const res = await fetch(`${HF}/${model}/resolve/main/${rfilename}`);
-  if (!res.ok) {
-    throw new Error(`  ✗ ${rfilename}: HTTP ${res.status}`);
-  }
+  if (!res.ok) throw new Error(`  ✗ ${rfilename}: HTTP ${res.status}`);
 
   const expected = Number(res.headers.get('content-length')) || 0;
   // Skip re-download if a complete copy already exists.
@@ -73,7 +81,8 @@ async function downloadFile(model, rfilename) {
 }
 
 async function main() {
-  console.log(`Saving models to: ${MODELS_DIR}\n`);
+  console.log(`Saving models to: ${MODELS_DIR}`);
+  console.log(`Backend weights: ${backend}\n`);
   for (const model of models) {
     console.log(`${model}`);
     const files = (await listFiles(model)).filter(shouldDownload);

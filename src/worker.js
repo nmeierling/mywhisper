@@ -110,7 +110,16 @@ async function handleLoad({ model, backend, modelBase }) {
   }
 }
 
-async function handleTranscribe({ jobId, audio, model, language, backend, modelBase }) {
+async function handleTranscribe({
+  jobId,
+  audio,
+  model,
+  language,
+  backend,
+  modelBase,
+  resumeFrom = 0, // seconds of audio already transcribed in a previous run
+  priorSegments = [], // segments produced before the interruption
+}) {
   if (modelBase) env.localModelPath = modelBase;
   currentJobId = jobId;
   abortRequested = false;
@@ -120,8 +129,11 @@ async function handleTranscribe({ jobId, audio, model, language, backend, modelB
       self.postMessage({ scope: 'model', status: 'progress', data }),
     );
 
-    const totalSeconds = audio.length / SAMPLE_RATE;
-    self.postMessage({ scope: 'job', jobId, status: 'transcribing', total: totalSeconds });
+    const fullSeconds = audio.length / SAMPLE_RATE;
+    // On resume, only transcribe the tail; its timestamps are offset by
+    // resumeFrom to stay absolute, and prior segments are prepended.
+    const work = resumeFrom > 0 ? audio.slice(Math.floor(resumeFrom * SAMPLE_RATE)) : audio;
+    self.postMessage({ scope: 'job', jobId, status: 'transcribing', total: fullSeconds });
 
     // All Whisper models use a 0.02s timestamp resolution; derive it when
     // possible, otherwise fall back to that value.
@@ -129,14 +141,38 @@ async function handleTranscribe({ jobId, audio, model, language, backend, modelB
     const maxPos = transcriber.model?.config?.max_source_positions;
     const timePrecision = chunkLen && maxPos ? chunkLen / maxPos : 0.02;
 
-    let chunkCount = 0; // completed 30s windows
+    let chunkCount = 0; // completed 30s windows within this run
     let segmentEnd = 0; // latest segment-end time within the current window
-    let partialText = '';
+    let liveSegments = []; // segments seen so far in this run (approximate)
+    let curSeg = null; // segment currently being decoded
+    let partialText = ''; // text streamed in this run (for live display)
+
+    const priorText = priorSegments.map((s) => s.text).join('');
+
+    // Absolute time of the current window's start (relative to the whole file).
+    const windowBase = () => resumeFrom + (CHUNK_LENGTH_S - STRIDE_LENGTH_S) * chunkCount;
 
     const sendUpdate = () => {
-      const base = (CHUNK_LENGTH_S - STRIDE_LENGTH_S) * chunkCount;
-      const processed = Math.min(totalSeconds, base + segmentEnd);
-      self.postMessage({ scope: 'job', jobId, status: 'update', processed, total: totalSeconds, text: partialText });
+      const processed = Math.min(fullSeconds, windowBase() + segmentEnd);
+      self.postMessage({
+        scope: 'job',
+        jobId,
+        status: 'update',
+        processed,
+        total: fullSeconds,
+        text: priorText + partialText,
+      });
+    };
+
+    const checkpoint = () => {
+      // Persist progress at a window boundary so a refresh can resume here.
+      self.postMessage({
+        scope: 'job',
+        jobId,
+        status: 'checkpoint',
+        segments: priorSegments.concat(liveSegments),
+        processedUpTo: resumeFrom + (CHUNK_LENGTH_S - STRIDE_LENGTH_S) * chunkCount,
+      });
     };
 
     const checkAbort = () => {
@@ -145,12 +181,22 @@ async function handleTranscribe({ jobId, audio, model, language, backend, modelB
 
     const streamer = new WhisperTextStreamer(transcriber.tokenizer, {
       time_precision: timePrecision,
+      on_chunk_start: (time) => {
+        curSeg = { start: windowBase() + time, end: windowBase() + time, text: '' };
+      },
       on_chunk_end: (time) => {
         segmentEnd = time;
+        if (curSeg) {
+          curSeg.end = windowBase() + time;
+          liveSegments.push(curSeg);
+          curSeg = null;
+        }
         sendUpdate();
         checkAbort();
       },
       callback_function: (text) => {
+        if (!curSeg) curSeg = { start: windowBase() + segmentEnd, end: windowBase() + segmentEnd, text: '' };
+        curSeg.text += text;
         partialText += text;
         sendUpdate();
         checkAbort();
@@ -158,6 +204,7 @@ async function handleTranscribe({ jobId, audio, model, language, backend, modelB
       on_finalize: () => {
         chunkCount += 1;
         segmentEnd = 0;
+        checkpoint();
       },
     });
 
@@ -172,22 +219,21 @@ async function handleTranscribe({ jobId, audio, model, language, backend, modelB
       options.task = 'transcribe';
     }
 
-    const output = await transcriber(audio, options);
+    const output = await transcriber(work, options);
 
-    // Streamed text can have overlap artifacts at window boundaries; the
-    // pipeline's returned text + chunks are the cleanly merged version.
-    // chunks: [{ text, timestamp: [start, end] }] → segments for the UI.
-    const segments = (output.chunks ?? [])
+    // The pipeline's returned chunks are the cleanly merged version of this
+    // run; offset by resumeFrom and prepend the prior segments.
+    const tail = (output.chunks ?? [])
       .filter((c) => Array.isArray(c.timestamp))
-      .map((c) => ({ start: c.timestamp[0] ?? 0, end: c.timestamp[1] ?? null, text: c.text }));
+      .map((c) => ({
+        start: (c.timestamp[0] ?? 0) + resumeFrom,
+        end: c.timestamp[1] == null ? null : c.timestamp[1] + resumeFrom,
+        text: c.text,
+      }));
+    const segments = priorSegments.concat(tail);
+    const text = segments.map((s) => s.text).join('').trim();
 
-    self.postMessage({
-      scope: 'job',
-      jobId,
-      status: 'complete',
-      text: output.text.trim(),
-      segments,
-    });
+    self.postMessage({ scope: 'job', jobId, status: 'complete', text, segments });
   } catch (error) {
     if (error?.message === 'ABORTED') {
       self.postMessage({ scope: 'job', jobId, status: 'canceled' });

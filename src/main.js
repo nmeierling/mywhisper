@@ -1,6 +1,14 @@
 import './style.css';
 import { LANGUAGES } from './languages.js';
 import { MODELS } from './config.js';
+import {
+  putJobMeta,
+  getAllJobMeta,
+  putAudio,
+  getAudio,
+  deleteJob,
+  requestPersistentStorage,
+} from './db.js';
 
 // Whisper expects mono PCM audio at 16 kHz.
 const WHISPER_SAMPLE_RATE = 16000;
@@ -31,13 +39,15 @@ const timestampsToggle = document.getElementById('timestamps-toggle');
 const timestampsToggleLabel = document.getElementById('timestamps-toggle-label');
 
 // --- State -------------------------------------------------------------------
-// jobs: { id, file, status, processed, total, text, error, startTime, els }
+// jobs: { id, order, file, status, processed, total, text, segments,
+//         processedUpTo, settings, error, startTime, audioUrl, activeSeg, els }
 // status: pending | decoding | transcribing | done | error | canceled
 const jobs = [];
-let jobSeq = 0;
+let orderSeq = 0; // monotonic ordering for the queue (persisted per job)
 let running = false; // is the queue currently being processed?
 let worker = null;
 let lastWarmKey = null; // model|backend last asked to warm-load
+let persistRequested = false;
 
 let currentResolve = null; // resolves the in-flight transcribeOnWorker promise
 let currentJob = null;
@@ -120,6 +130,7 @@ function onJobMessage(data) {
       job.total = data.total ?? 0;
       job.startTime = performance.now();
       updateJobRow(job);
+      persistJob(job);
       break;
     case 'update':
       job.processed = data.processed;
@@ -127,22 +138,32 @@ function onJobMessage(data) {
       job.text = data.text;
       updateJobRow(job);
       break;
+    case 'checkpoint':
+      // Window boundary reached — persist progress so a refresh can resume here.
+      job.segments = data.segments ?? [];
+      job.processedUpTo = data.processedUpTo ?? 0;
+      persistJob(job);
+      break;
     case 'complete':
       job.status = 'done';
       job.text = data.text;
       job.segments = data.segments ?? [];
+      job.processedUpTo = job.total;
       updateJobRow(job);
+      persistJob(job);
       resolveCurrent();
       break;
     case 'canceled':
       job.status = 'canceled';
       updateJobRow(job);
+      persistJob(job);
       resolveCurrent();
       break;
     case 'error':
       job.status = 'error';
       job.error = data.message;
       updateJobRow(job);
+      persistJob(job);
       resolveCurrent();
       break;
   }
@@ -156,14 +177,64 @@ function resolveCurrent() {
   if (resolve) resolve();
 }
 
+// --- Persistence -------------------------------------------------------------
+// Build the small metadata record stored in IndexedDB (no audio bytes).
+function jobMeta(job) {
+  return {
+    id: job.id,
+    order: job.order,
+    name: job.file.name,
+    type: job.file.type,
+    status: job.status,
+    text: job.text,
+    segments: job.segments,
+    processedUpTo: job.processedUpTo,
+    settings: job.settings,
+  };
+}
+
+function persistJob(job) {
+  putJobMeta(jobMeta(job)).catch(() => {}); // best-effort; never block the UI
+}
+
+function makeJob(file, fields = {}) {
+  return {
+    id: fields.id ?? crypto.randomUUID(),
+    order: fields.order ?? orderSeq++,
+    file,
+    status: 'pending',
+    processed: 0,
+    total: 0,
+    text: '',
+    segments: [],
+    processedUpTo: 0,
+    settings: null,
+    error: '',
+    startTime: 0,
+    audioUrl: null,
+    activeSeg: -1,
+    ...fields,
+  };
+}
+
 // --- File handling -----------------------------------------------------------
 function addFiles(fileList) {
+  if (!persistRequested) {
+    persistRequested = true;
+    requestPersistentStorage(); // ask for durable storage (best-effort)
+  }
   let added = 0;
   for (const file of fileList) {
     if (!isAudio(file)) continue;
-    const job = { id: ++jobSeq, file, status: 'pending', processed: 0, total: 0, text: '', segments: [], error: '', startTime: 0, audioUrl: null, activeSeg: -1 };
+    const job = makeJob(file);
     jobs.push(job);
     createJobRow(job);
+    persistJob(job);
+    // Store the audio bytes once; needed to resume / re-listen after a reload.
+    putAudio(job.id, file).catch(() => {
+      // Likely a storage-quota error: keep going (works this session, but this
+      // file won't survive a reload).
+    });
     added += 1;
   }
   if (added === 0) {
@@ -294,6 +365,21 @@ function transcribeOnWorker(job, audio) {
   return new Promise((resolve) => {
     currentJob = job;
     currentResolve = resolve;
+
+    // A resumed job keeps the settings it started with; a fresh job adopts the
+    // current UI selection (and remembers it, so a resume stays consistent).
+    if (!job.settings) {
+      job.settings = {
+        model: modelSelect.value,
+        language: languageSelect.value,
+        backend: backendSelect.value,
+      };
+    }
+
+    // Resume only the unfinished tail if we have a checkpoint for this job.
+    const resumeFrom = job.processedUpTo > 0 ? job.processedUpTo : 0;
+    const priorSegments = resumeFrom > 0 ? job.segments.filter((s) => s.start < resumeFrom) : [];
+
     // Transfer the audio buffer (zero-copy) — `audio` is unusable afterward,
     // which is fine since we drop it.
     getWorker().postMessage(
@@ -301,10 +387,12 @@ function transcribeOnWorker(job, audio) {
         type: 'transcribe',
         jobId: job.id,
         audio,
-        model: modelSelect.value,
-        language: languageSelect.value,
-        backend: backendSelect.value,
+        model: job.settings.model,
+        language: job.settings.language,
+        backend: job.settings.backend,
         modelBase: MODEL_BASE,
+        resumeFrom,
+        priorSegments,
       },
       [audio.buffer],
     );
@@ -319,6 +407,7 @@ function removeJob(job) {
   decoded.delete(job.id);
   if (job.audioUrl) URL.revokeObjectURL(job.audioUrl);
   job.els?.root.remove();
+  deleteJob(job.id).catch(() => {});
   if (jobs.length === 0) queueSection.hidden = true;
   updateButton();
   updateSummary();
@@ -334,8 +423,10 @@ function retryJob(job) {
   job.segments = [];
   job.error = '';
   job.processed = 0;
+  job.processedUpTo = 0; // restart from the beginning
   job.activeSeg = -1;
   updateJobRow(job);
+  persistJob(job);
   updateButton();
   updateSummary();
   if (running) return; // active loop will pick it up
@@ -454,7 +545,7 @@ function updateJobRow(job) {
 
   // Status label
   const labels = {
-    pending: 'Pending',
+    pending: job.processedUpTo > 0 ? `Pending — resumes from ${formatTime(job.processedUpTo)}` : 'Pending',
     decoding: 'Decoding…',
     transcribing: progressLabel(job),
     done: 'Done',
@@ -688,3 +779,69 @@ function formatTime(seconds) {
   if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
   return `${m}:${String(sec).padStart(2, '0')}`;
 }
+
+// --- Restore on load ---------------------------------------------------------
+// Rebuild the queue from IndexedDB. Finished jobs come back fully usable; a job
+// interrupted mid-transcription comes back as "pending" with its checkpoint, so
+// running the queue resumes it from the last completed window.
+async function restore() {
+  let metas;
+  try {
+    metas = await getAllJobMeta();
+  } catch {
+    return; // no persisted state (or IndexedDB unavailable)
+  }
+  if (!metas?.length) return;
+
+  metas.sort((a, b) => a.order - b.order);
+  for (const m of metas) {
+    const rec = await getAudio(m.id).catch(() => null);
+    if (!rec?.blob) {
+      // Audio bytes missing (quota failure, or storage cleared) — we can't
+      // resume or re-listen, so drop the stale metadata.
+      deleteJob(m.id).catch(() => {});
+      continue;
+    }
+    const file = new File([rec.blob], m.name, { type: m.type });
+    // An interrupted run was mid-transcribe/decode; reopen it as pending so the
+    // checkpoint (processedUpTo + segments) drives a resume.
+    const status = m.status === 'transcribing' || m.status === 'decoding' ? 'pending' : m.status;
+    const job = makeJob(file, {
+      id: m.id,
+      order: m.order,
+      status,
+      text: m.text ?? '',
+      segments: m.segments ?? [],
+      processedUpTo: m.processedUpTo ?? 0,
+      settings: m.settings ?? null,
+    });
+    jobs.push(job);
+    orderSeq = Math.max(orderSeq, m.order + 1);
+    createJobRow(job);
+  }
+
+  if (jobs.length) {
+    // Restore the dropdowns from the most recent job's settings so warm-load
+    // (and the visible selection) match what was in use.
+    const recent = jobs.filter((j) => j.settings).sort((a, b) => b.order - a.order)[0];
+    if (recent) {
+      if (MODELS.some((m) => m.id === recent.settings.model)) modelSelect.value = recent.settings.model;
+      languageSelect.value = recent.settings.language;
+      backendSelect.value = recent.settings.backend;
+    }
+    queueSection.hidden = false;
+    updateButton();
+    updateSummary();
+    warmLoad();
+  }
+}
+
+// Warn before leaving while work is in progress (a reload kills the worker).
+window.addEventListener('beforeunload', (e) => {
+  if (running) {
+    e.preventDefault();
+    e.returnValue = '';
+  }
+});
+
+restore();

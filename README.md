@@ -22,6 +22,22 @@ transcript (or all of them), optionally with `[m:ss]` timestamps inline.
    for the hardware, since parallel workers would each reload the model and just
    contend for the same CPU/GPU. While one file transcribes, the **next file's
    audio is decoded ahead**, hiding decode latency.
+5. The queue, transcripts, and original audio are **persisted to IndexedDB**, so
+   a reload restores everything. A file interrupted mid-transcription resumes
+   from its last completed ~30s window rather than starting over.
+
+### Persistence & resume
+
+- Completed transcripts (as timestamped segments), queue order, settings, and
+  the original audio blobs are stored in IndexedDB; the app calls
+  `navigator.storage.persist()` to request durable storage.
+- During a run, progress is checkpointed at each 30s window boundary. After a
+  refresh/crash, an interrupted job reopens as "pending" and, when run, only the
+  unfinished tail is re-transcribed (its timestamps offset to stay absolute).
+- The audio bytes are persisted so resume and re-listen work after a reload.
+  This costs storage (tens of MB per file); if the quota is exceeded the
+  transcript still saves, but that file won't survive a reload.
+- A `beforeunload` prompt warns before leaving while a transcription is running.
 
 ### Backends
 
@@ -119,5 +135,4 @@ model load into memory (warmed as soon as you add files).
   accurate for English.
 - Subtitle export (`.srt`, `.vtt`) — the timestamped segments are already there.
 - Microphone recording as an input source.
-- Persist transcripts + chunk-level resume (IndexedDB) so a reload doesn't lose
-  progress.
+- A storage cap / "clear stored audio" control to bound IndexedDB usage.
